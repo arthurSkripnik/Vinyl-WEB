@@ -2,34 +2,42 @@
 <html lang="uk">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Сканер платівок</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Ящики</title>
   <link rel="stylesheet" href="styles.css">
   <link rel="prefetch" href="database.json">
 </head>
-<body data-mode="single">
+<body>
   <main>
     <header>
-      <h1>Сканер платівок</h1>
+      <h1>Ящики</h1>
       <p id="status" aria-live="polite">Завантаження OpenCV…</p>
     </header>
 
-    <div class="modes" role="group" aria-label="Режим">
-      <button type="button" id="mode-single" aria-pressed="true">
-        Разова перевірка
-        <small>Один диск. Повний збіг із локальною базою.</small>
-      </button>
-      <button type="button" id="mode-crate" aria-pressed="false">
-        Копання ящиків
-        <small>Безперервний скан. Той самий id ігнорується 5 секунд.</small>
-      </button>
-    </div>
+    <section class="crate-bar" aria-label="Вибір ящика">
+      <label class="field" for="crate-select">Ящик
+        <select id="crate-select"></select>
+      </label>
+      <div class="crate-create">
+        <label class="field" for="crate-name">Новий ящик
+          <input id="crate-name" type="text" maxlength="60" placeholder="Назва" autocomplete="off" enterkeyhint="done">
+        </label>
+        <button type="button" id="crate-create">Створити</button>
+      </div>
+    </section>
 
-    <div class="stage">
-      <canvas id="view" width="960" height="720"></canvas>
+    <section class="stage" aria-label="Видошукач">
+      <canvas id="view" width="720" height="960"></canvas>
+      <p class="capture-note">Автозахоплення</p>
       <div id="banner" class="banner" hidden></div>
       <div id="toast" class="toast" role="status" hidden></div>
-    </div>
+    </section>
+
+    <section class="counters" aria-live="polite">
+      <p><strong id="count-scanned">0</strong><span>Скановано</span></p>
+      <p><strong id="count-processing">0</strong><span>Обробка</span></p>
+      <p><strong id="count-matched">0</strong><span>Збіги</span></p>
+    </section>
 
     <div class="controls">
       <button type="button" id="start-camera" disabled>Камера</button>
@@ -42,23 +50,26 @@
 
     <p id="result" data-state="idle" aria-live="polite"></p>
 
-    <section id="crate-panel" hidden>
-      <h2>Сесія ящика <span id="crate-count">0</span></h2>
-      <p class="hint">Новий рядок з’являється, якщо цей id ще не додавали протягом останніх 5 секунд. Файл сесії лишається в пам’яті, доки не оновити сторінку.</p>
-      <div class="discogs-account">
+    <section id="crate-panel">
+      <h2>Вміст ящика</h2>
+      <ol id="crate-list"></ol>
+      <p id="crate-empty">Поки порожньо.</p>
+      <div id="crate-actions">
+        <button type="button" id="export-ai" disabled>Експорт для ШІ</button>
+        <button type="button" id="wishlist-check" disabled>Список бажань</button>
+        <button type="button" id="wantlist-refresh" disabled>Оновити з Discogs</button>
+        <button type="button" id="discogs-info" disabled>Дані Discogs</button>
+      </div>
+      <div class="account">
+        <label class="field" for="gemini-api-key">Ключ Gemini
+          <input id="gemini-api-key" name="gemini-api-key" type="password" value="" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="text">
+        </label>
+        <p class="hint">Ключ лишається лише в цьому браузері. Порожнє поле — Gemini не викликається.</p>
         <label class="field" for="discogs-username">Ім’я Discogs
           <input id="discogs-username" type="text" value="Look_at_my_scarface" autocomplete="username" autocapitalize="off" spellcheck="false">
         </label>
+        <p class="hint">Статус списку бажань береться з локального wantlist.json. Оновити з Discogs перечитує відкритий список, коли є інтернет.</p>
       </div>
-      <p class="hint">Список бажань читає локальний wantlist.json і працює без мережі. Оновити з Discogs перечитує відкритий список, коли є інтернет.</p>
-      <div id="crate-actions" hidden>
-        <button type="button" id="discogs-info">Дані Discogs</button>
-        <button type="button" id="wishlist-check">Список бажань</button>
-        <button type="button" id="wantlist-refresh">Оновити з Discogs</button>
-        <button type="button" id="export-ai">Експорт для ШІ</button>
-      </div>
-      <ol id="crate-list"></ol>
-      <p id="crate-empty">Поки порожньо.</p>
     </section>
   </main>
 

@@ -13,6 +13,7 @@ const MAX_EDGE = 800;
 const ORB_NFEATURES = 1000;
 const MIN_FEATURES = 8;
 const CRATE_COOLDOWN_MS = 5000;
+const BLUR_VARIANCE_MIN = 100;
 
 const statusEl = document.getElementById("status");
 const resultEl = document.getElementById("result");
@@ -28,32 +29,41 @@ const fileInput = document.getElementById("file-input");
 const cratePanel = document.getElementById("crate-panel");
 const crateList = document.getElementById("crate-list");
 const crateEmpty = document.getElementById("crate-empty");
-const crateCount = document.getElementById("crate-count");
-const crateActions = document.getElementById("crate-actions");
 const discogsBtn = document.getElementById("discogs-info");
 const wishlistBtn = document.getElementById("wishlist-check");
 const refreshBtn = document.getElementById("wantlist-refresh");
 const exportAiBtn = document.getElementById("export-ai");
 const usernameInput = document.getElementById("discogs-username");
+const crateSelect = document.getElementById("crate-select");
+const crateNameInput = document.getElementById("crate-name");
+const crateCreateBtn = document.getElementById("crate-create");
+const countScanned = document.getElementById("count-scanned");
+const countProcessing = document.getElementById("count-processing");
+const countMatched = document.getElementById("count-matched");
+const geminiKeyInput = document.getElementById("gemini-api-key");
 const DISCOGS_UA = "VinylCoverScanner/1.0 (local static crate tool; http://127.0.0.1:8000)";
 const DISCOGS_USER_KEY = "vinyl-scanner.discogs.username";
 const DEFAULT_DISCOGS_USER = "Look_at_my_scarface";
 const PRIVATE_WANTLIST = "Список бажань приватний. Потрібен токен Discogs.";
+const GEMINI_KEY_STORAGE = "vinyl-scanner.gemini.apiKey";
+const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-3.8-flash"];
 
 let orb = null;
 let matcher = null;
 let records = [];
 let ready = false;
-let mode = "single";
+let mode = "crate";
 let cameraOn = false;
 let raf = 0;
 let liveToken = 0;
 let toastTimer = 0;
 let discogsBusy = false;
 let wishlistBusy = false;
-let sessionCreated = null;
-const session = [];
-const lastAddedAt = new Map();
+let bakedWants = [];
+const crates = [];
+let activeCrate = null;
+const geminiQueue = [];
+let geminiDrainTimer = 0;
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -425,16 +435,71 @@ function appendLine(parent, className, text) {
   return line;
 }
 
+function addChip(parent, kind, text) {
+  const chip = document.createElement("span");
+  chip.className = `chip chip-${kind}`;
+  chip.textContent = text;
+  parent.appendChild(chip);
+}
+
+function chipRow(labels) {
+  const row = document.createElement("p");
+  row.className = "chips";
+  for (const label of labels) addChip(row, label.kind, label.text);
+  return row;
+}
+
+function renderCrateSelect() {
+  crateSelect.replaceChildren();
+  for (const crate of crates) {
+    const option = document.createElement("option");
+    option.value = crate.id;
+    option.textContent = crate.name;
+    if (crate === activeCrate) option.selected = true;
+    crateSelect.appendChild(option);
+  }
+}
+
+function createCrate(name) {
+  const label = String(name || "").trim() || `Ящик ${crates.length + 1}`;
+  const crate = {
+    id: crypto.randomUUID(),
+    name: label,
+    created: null,
+    items: [],
+    unknowns: [],
+    lastAddedAt: new Map(),
+    lastUnknownAt: Number.NEGATIVE_INFINITY,
+  };
+  crates.push(crate);
+  activateCrate(crate.id);
+  return crate;
+}
+
+function activateCrate(id) {
+  const next = crates.find((crate) => crate.id === id);
+  if (!next) return;
+  activeCrate = next;
+  renderCrateSelect();
+  renderCrate();
+}
+
 function renderCrate() {
+  const items = activeCrate ? activeCrate.items : [];
+  const rows = activeCrate ? activeCrate.unknowns : [];
   crateList.replaceChildren();
-  for (const item of session) {
+  for (const item of items) {
     const li = document.createElement("li");
+    const chips = [{ kind: "local", text: "у локальній базі" }];
+    if (item.on_wishlist === true) chips.push({ kind: "want", text: "у списку бажань" });
+    li.dataset.status = chips.map((chip) => chip.kind).join(" ");
     const percent = Math.round(item.confidence * 100);
     appendLine(
       li,
       "crate-title",
       `${item.artist} — ${item.album} (${item.year}) · ${item.genre} · ${percent}%`
     );
+    li.appendChild(chipRow(chips));
     appendLine(li, "crate-detail", `Стилі: ${item.styles.join(", ")}`);
     if (item.discogs) {
       const info = item.discogs;
@@ -465,24 +530,33 @@ function renderCrate() {
     } else if (item.discogsError) {
       appendLine(li, "crate-error", item.discogsError);
     }
-    const wishClass = item.on_wishlist === true ? "crate-detail crate-wish-yes" : "crate-detail";
-    appendLine(li, wishClass, `Список бажань: ${wishlistLabel(item.on_wishlist)}`);
     crateList.appendChild(li);
   }
-  const hasItems = session.length > 0;
-  crateEmpty.hidden = hasItems;
-  crateActions.hidden = !hasItems;
-  crateCount.textContent = String(session.length);
-  discogsBtn.disabled = !hasItems || discogsBusy;
-  wishlistBtn.disabled = !hasItems || wishlistBusy;
-  refreshBtn.disabled = !hasItems || wishlistBusy;
-  exportAiBtn.disabled = !hasItems;
-}
-
-function wishlistLabel(value) {
-  if (value === true) return "так";
-  if (value === false) return "ні";
-  return "не перевірено";
+  for (const item of rows) {
+    const li = document.createElement("li");
+    const kind = item.state === "processing" ? "processing" : item.state === "enriched" ? "gemini" : "unknown";
+    const text = kind === "processing" ? "обробка" : kind === "gemini" ? "розпізнано Gemini" : "невідомо";
+    li.dataset.status = kind === "gemini" ? "enriched" : kind;
+    appendLine(li, "crate-title", `[${item.label}]`);
+    li.appendChild(chipRow([{ kind, text }]));
+    if (item.state === "enriched") {
+      const name = [item.artist, item.album].filter(Boolean).join(" — ");
+      const year = item.year ? ` (${item.year})` : "";
+      if (name || item.year) appendLine(li, "crate-detail", `${name}${year}`);
+    }
+    if (item.barcode) appendLine(li, "crate-detail", item.barcode);
+    if (item.geminiError) appendLine(li, "crate-error", item.geminiError);
+    crateList.appendChild(li);
+  }
+  const processing = rows.filter((item) => item.state === "processing").length;
+  countScanned.textContent = String(items.length + rows.length);
+  countProcessing.textContent = String(processing);
+  countMatched.textContent = String(items.length);
+  crateEmpty.hidden = items.length + rows.length > 0;
+  discogsBtn.disabled = items.length === 0 || discogsBusy;
+  wishlistBtn.disabled = items.length === 0 || wishlistBusy;
+  refreshBtn.disabled = items.length === 0 || wishlistBusy;
+  exportAiBtn.disabled = items.length + rows.length === 0;
 }
 
 function showToast(text) {
@@ -506,12 +580,12 @@ function vibrateTick() {
 function considerCrate(hit) {
   const id = String(hit.meta.id);
   const now = performance.now();
-  const previous = lastAddedAt.get(id);
+  const previous = activeCrate.lastAddedAt.get(id);
   if (previous != null && now - previous < CRATE_COOLDOWN_MS) return;
-  lastAddedAt.set(id, now);
-  if (!sessionCreated) sessionCreated = new Date().toISOString();
+  activeCrate.lastAddedAt.set(id, now);
+  if (!activeCrate.created) activeCrate.created = new Date().toISOString();
   const styles = Array.isArray(hit.meta.styles) ? hit.meta.styles.slice() : [];
-  session.push({
+  const record = {
     id,
     artist: hit.meta.artist,
     album: hit.meta.album,
@@ -522,7 +596,12 @@ function considerCrate(hit) {
     discogs: null,
     on_wishlist: null,
     discogsError: "",
-  });
+  };
+  if (typeof hit.meta.spotify_source === "string" && hit.meta.spotify_source.trim()) {
+    record.spotify_source = hit.meta.spotify_source.trim();
+  }
+  if (bakedWants.length) record.on_wishlist = wantlistHit(record, bakedWants);
+  activeCrate.items.push(record);
   renderCrate();
   showToast(`Додано: ${hit.meta.artist} — ${hit.meta.album}`);
   vibrateTick();
@@ -539,36 +618,81 @@ function present(outcome) {
 
 function sessionDocument() {
   return {
-    created: sessionCreated,
-    items: session.map((item) => ({
-      id: item.id,
-      artist: item.artist,
-      album: item.album,
-      year: item.year,
-      genre: item.genre,
-      styles: item.styles.slice(),
-      confidence: item.confidence,
-      discogs: item.discogs,
-      on_wishlist: item.on_wishlist,
-    })),
+    crate: activeCrate.name,
+    created: activeCrate.created,
+    items: activeCrate.items.map((item) => {
+      const row = {
+        id: item.id,
+        artist: item.artist,
+        album: item.album,
+        year: item.year,
+        genre: item.genre,
+        styles: item.styles.slice(),
+        confidence: item.confidence,
+        discogs: item.discogs,
+        on_wishlist: item.on_wishlist,
+      };
+      if (item.spotify_source) row.spotify_source = item.spotify_source;
+      return row;
+    }),
+    unknowns: activeCrate.unknowns.map((item) => {
+      const row = {
+        file: item.file,
+        label: item.label,
+        barcode: item.barcode,
+        jpeg_base64: item.jpeg,
+        state: item.state,
+      };
+      if (item.state === "enriched") {
+        row.artist = item.artist;
+        row.album = item.album;
+        row.year = item.year;
+      }
+      if (item.geminiError) row.error = item.geminiError;
+      return row;
+    }),
   };
 }
 
+function matchedStatus(item) {
+  const parts = [];
+  if (item.on_wishlist === true) parts.push("IN DISCOGS WANTLIST");
+  if (item.spotify_source) parts.push(item.spotify_source);
+  return parts.join(" | ");
+}
+
+function unknownExportLine(item, index) {
+  const code = item.barcode ? ` ${item.barcode}` : "";
+  if (item.state === "enriched") {
+    const name = [item.artist, item.album].filter(Boolean).join(" - ");
+    const year = item.year ? ` (${item.year})` : "";
+    const who = name || item.year ? ` ${name}${year}` : "";
+    return `${index + 1}. [${item.label}]${who}${code}`;
+  }
+  return `${index + 1}. [${item.label}]${code}`;
+}
+
 function sessionText() {
-  const blocks = session.map((item) => {
-    const url = item.discogs && item.discogs.uri ? item.discogs.uri : "none";
-    const wish = item.on_wishlist === null ? "null" : String(item.on_wishlist);
-    return [
-      `${item.artist} — ${item.album}`,
-      `year: ${item.year}`,
-      `genre: ${item.genre}`,
-      `styles: ${item.styles.join(", ")}`,
-      `confidence: ${item.confidence}`,
-      `discogs: ${url}`,
-      `on_wishlist: ${wish}`,
-    ].join("\n");
-  });
-  return `${blocks.join("\n\n")}\n`;
+  const date = activeCrate.created ? activeCrate.created.slice(0, 10) : localStamp();
+  const matched = activeCrate.items.map((item, index) => (
+    `${index + 1}. ${item.artist} - ${item.album} (${item.year}) | Genre: ${item.genre} | Status: ${matchedStatus(item)}`
+  ));
+  const unmatched = activeCrate.unknowns.map(unknownExportLine);
+  return [
+    `Crate session ${date}`,
+    activeCrate.name,
+    "",
+    "[MATCHED IN LOCAL DB]",
+    matched.join("\n"),
+    "",
+    "[UNKNOWN / UNMATCHED]",
+    unmatched.join("\n"),
+    "",
+    `Total Scanned: ${activeCrate.items.length + activeCrate.unknowns.length}`,
+    `Matched: ${activeCrate.items.length}`,
+    `Unknown: ${activeCrate.unknowns.length}`,
+    "",
+  ].join("\n");
 }
 
 function localStamp(date = new Date()) {
@@ -591,7 +715,7 @@ function downloadBlob(blob, filename) {
 }
 
 function exportForAi() {
-  if (!session.length) return;
+  if (!activeCrate || (!activeCrate.items.length && !activeCrate.unknowns.length)) return;
   const stamp = localStamp();
   const json = `${JSON.stringify(sessionDocument(), null, 2)}\n`;
   downloadBlob(new Blob([json], { type: "application/json" }), `crate_session_${stamp}.json`);
@@ -661,11 +785,11 @@ async function lookupDiscogs(item) {
 }
 
 async function fillDiscogs() {
-  if (!session.length || discogsBusy) return;
+  if (!activeCrate.items.length || discogsBusy) return;
   discogsBusy = true;
   renderCrate();
   try {
-    for (const item of session) {
+    for (const item of activeCrate.items) {
       item.discogsError = "Запит до Discogs…";
       renderCrate();
       try {
@@ -792,13 +916,33 @@ function loadDiscogsAccount() {
 
 function applyWantlist(wants, source) {
   const compact = wants.map(compactWant).filter(Boolean);
-  for (const item of session) item.on_wishlist = wantlistHit(item, compact);
-  const yes = session.filter((item) => item.on_wishlist).length;
-  setStatus(`Список бажань (${source}): ${yes} із ${session.length}.`);
+  bakedWants = compact;
+  for (const crate of crates) {
+    for (const item of crate.items) item.on_wishlist = wantlistHit(item, compact);
+  }
+  const yes = activeCrate.items.filter((item) => item.on_wishlist).length;
+  setStatus(`Список бажань (${source}): ${yes} із ${activeCrate.items.length}.`);
+}
+
+async function loadBakedWantlist() {
+  try {
+    const response = await fetch("wantlist.json");
+    if (!response.ok) throw new Error("wantlist.json не прочитано");
+    const data = await response.json();
+    if (!Array.isArray(data)) throw new Error("wantlist.json має бути масивом");
+    bakedWants = data.map(compactWant).filter(Boolean);
+    for (const crate of crates) {
+      for (const item of crate.items) item.on_wishlist = wantlistHit(item, bakedWants);
+    }
+  } catch (err) {
+    bakedWants = [];
+  }
+  document.documentElement.dataset.wantlist = String(bakedWants.length);
+  renderCrate();
 }
 
 async function checkWishlist() {
-  if (!session.length || wishlistBusy) return;
+  if (!activeCrate.items.length || wishlistBusy) return;
   wishlistBusy = true;
   renderCrate();
   setStatus("Читаю локальний список бажань…");
@@ -817,7 +961,7 @@ async function checkWishlist() {
 }
 
 async function refreshWantlist() {
-  if (!session.length || wishlistBusy) return;
+  if (!activeCrate.items.length || wishlistBusy) return;
   const username = usernameInput.value.trim() || DEFAULT_DISCOGS_USER;
   if (/[\s/?#]/.test(username)) {
     setStatus("Ім’я Discogs містить недопустимі символи.");
@@ -838,17 +982,9 @@ async function refreshWantlist() {
   }
 }
 
-function setMode(next) {
-  mode = next === "crate" ? "crate" : "single";
-  document.body.dataset.mode = mode;
-  document.getElementById("mode-single").setAttribute("aria-pressed", mode === "single" ? "true" : "false");
-  document.getElementById("mode-crate").setAttribute("aria-pressed", mode === "crate" ? "true" : "false");
-  cratePanel.hidden = mode !== "crate";
-}
-
 function drawPlaceholder() {
-  view.width = 960;
-  view.height = 720;
+  view.width = 720;
+  view.height = 960;
   ctx.fillStyle = "#070708";
   ctx.fillRect(0, 0, view.width, view.height);
   const box = viewfinderBox(view.width, view.height);
@@ -872,6 +1008,288 @@ function stopCamera() {
   stopBtn.disabled = true;
 }
 
+function roiLaplacianVariance(frame) {
+  const [x0, y0, x1, y1] = viewfinderBox(frame.cols, frame.rows);
+  const rect = new cv.Rect(x0, y0, x1 - x0, y1 - y0);
+  const header = frame.roi(rect);
+  const roi = header.clone();
+  header.delete();
+  deleteIf(rect);
+  const gray = toGray(roi);
+  roi.delete();
+  const lap = new cv.Mat();
+  const mean = new cv.Mat();
+  const stddev = new cv.Mat();
+  try {
+    cv.Laplacian(gray, lap, cv.CV_64F);
+    cv.meanStdDev(lap, mean, stddev);
+    const sigma = stddev.doubleAt(0, 0);
+    return sigma * sigma;
+  } finally {
+    gray.delete();
+    lap.delete();
+    mean.delete();
+    stddev.delete();
+  }
+}
+
+function cropCanvas(source, box) {
+  const [x0, y0, x1, y1] = box;
+  const width = Math.max(1, x1 - x0);
+  const height = Math.max(1, y1 - y0);
+  const crop = document.createElement("canvas");
+  crop.width = width;
+  crop.height = height;
+  crop.getContext("2d").drawImage(source, x0, y0, width, height, 0, 0, width, height);
+  return crop;
+}
+
+function canvasJpegBlob(canvas) {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.7);
+  });
+}
+
+function blobBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || "");
+      const comma = text.indexOf(",");
+      resolve(comma >= 0 ? text.slice(comma + 1) : text);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function readBarcode(canvas) {
+  if (typeof BarcodeDetector !== "function") return null;
+  try {
+    const detector = new BarcodeDetector();
+    const codes = await detector.detect(canvas);
+    if (!codes || !codes.length || !codes[0].rawValue) return null;
+    return String(codes[0].rawValue);
+  } catch (err) {
+    return null;
+  }
+}
+
+function readGeminiKey() {
+  return geminiKeyInput.value.trim();
+}
+
+function persistGeminiKey() {
+  try {
+    const key = readGeminiKey();
+    if (key) localStorage.setItem(GEMINI_KEY_STORAGE, key);
+    else localStorage.removeItem(GEMINI_KEY_STORAGE);
+  } catch (err) {
+    // Storage can be blocked. The typed key is still used on this page.
+  }
+}
+
+function loadGeminiKey() {
+  try {
+    const stored = localStorage.getItem(GEMINI_KEY_STORAGE);
+    geminiKeyInput.value = typeof stored === "string" ? stored : "";
+  } catch (err) {
+    geminiKeyInput.value = "";
+  }
+}
+
+function geminiRequestBody(jpeg) {
+  return {
+    contents: [{
+      role: "user",
+      parts: [
+        {
+          text: "This is a photo of a vinyl record cover. Return JSON with only artist, album, and year. Use an empty string when a field is not visible.",
+        },
+        { inlineData: { mimeType: "image/jpeg", data: jpeg } },
+      ],
+    }],
+    generationConfig: {
+      temperature: 0,
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "OBJECT",
+        properties: {
+          artist: { type: "STRING" },
+          album: { type: "STRING" },
+          year: { type: "STRING" },
+        },
+        required: ["artist", "album", "year"],
+      },
+    },
+  };
+}
+
+function parseGeminiPayload(data) {
+  const parts = data && data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts;
+  if (!Array.isArray(parts)) throw new Error("Gemini не відповів.");
+  const text = parts.map((part) => (typeof part.text === "string" ? part.text : "")).join("");
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new Error("Gemini не відповів.");
+  }
+  if (!parsed || typeof parsed !== "object") throw new Error("Gemini не відповів.");
+  const artist = typeof parsed.artist === "string" ? parsed.artist.trim() : "";
+  const album = typeof parsed.album === "string" ? parsed.album.trim() : "";
+  let year = "";
+  if (typeof parsed.year === "string") year = parsed.year.trim();
+  else if (typeof parsed.year === "number" && Number.isFinite(parsed.year)) year = String(parsed.year);
+  return { artist, album, year };
+}
+
+async function modelIsMissing(response) {
+  if (response.status === 404) return true;
+  if (response.status !== 400) return false;
+  try {
+    const data = await response.json();
+    return Boolean(data && data.error && data.error.status === "NOT_FOUND");
+  } catch (err) {
+    return false;
+  }
+}
+
+async function askGemini(jpeg, apiKey) {
+  for (const model of GEMINI_MODELS) {
+    let response;
+    try {
+      response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey,
+        },
+        body: JSON.stringify(geminiRequestBody(jpeg)),
+      });
+    } catch (err) {
+      throw new Error("Gemini недоступний.");
+    }
+    if (response.ok) return parseGeminiPayload(await response.json());
+    if (await modelIsMissing(response)) continue;
+    throw new Error("Gemini не відповів.");
+  }
+  throw new Error("Gemini не відповів.");
+}
+
+function enqueueGemini(entry) {
+  if (!readGeminiKey() || !entry.jpeg) return;
+  entry.state = "processing";
+  entry.geminiError = "";
+  geminiQueue.push(entry);
+  renderCrate();
+  if (!geminiDrainTimer) geminiDrainTimer = window.setTimeout(drainGemini, 0);
+}
+
+async function drainGemini() {
+  geminiDrainTimer = 0;
+  const entry = geminiQueue.shift();
+  if (!entry) return;
+  const apiKey = readGeminiKey();
+  if (!apiKey || !entry.jpeg) {
+    entry.state = "unknown";
+    if (!entry.jpeg) entry.geminiError = "Немає кадру для Gemini.";
+    renderCrate();
+  } else {
+    try {
+      const found = await askGemini(entry.jpeg, apiKey);
+      entry.artist = found.artist;
+      entry.album = found.album;
+      entry.year = found.year;
+      entry.state = "enriched";
+      entry.geminiError = "";
+    } catch (err) {
+      entry.state = "unknown";
+      entry.artist = "";
+      entry.album = "";
+      entry.year = "";
+      entry.geminiError = err && err.message ? err.message : "Gemini не відповів.";
+    }
+    renderCrate();
+  }
+  if (geminiQueue.length) geminiDrainTimer = window.setTimeout(drainGemini, 0);
+}
+
+function considerUnknown(box) {
+  const now = performance.now();
+  if (now - activeCrate.lastUnknownAt < CRATE_COOLDOWN_MS) return;
+  activeCrate.lastUnknownAt = now;
+  const nn = String(activeCrate.unknowns.length + 1).padStart(2, "0");
+  const entry = {
+    file: `unknown_${nn}.jpg`,
+    label: `UNKNOWN_COVER_${nn}.JPG`,
+    barcode: null,
+    jpeg: "",
+    state: readGeminiKey() ? "processing" : "unknown",
+    artist: "",
+    album: "",
+    year: "",
+    geminiError: "",
+  };
+  if (!activeCrate.created) activeCrate.created = new Date().toISOString();
+  activeCrate.unknowns.push(entry);
+  const crop = cropCanvas(view, box);
+  renderCrate();
+  showToast(`[${entry.label}]`);
+  storeUnknown(entry, crop);
+}
+
+async function storeUnknown(entry, crop) {
+  try {
+    const blob = await canvasJpegBlob(crop);
+    if (blob) entry.jpeg = await blobBase64(blob);
+  } catch (err) {
+    entry.jpeg = "";
+  }
+  entry.barcode = await readBarcode(crop);
+  if (readGeminiKey() && entry.jpeg) enqueueGemini(entry);
+  else {
+    entry.state = "unknown";
+    if (readGeminiKey() && !entry.jpeg) entry.geminiError = "Немає кадру для Gemini.";
+    renderCrate();
+  }
+}
+
+function finishCapturedFrame(frame) {
+  let dropped = false;
+  let score = 0;
+  let outcome = null;
+  try {
+    if (mode === "crate") {
+      score = roiLaplacianVariance(frame);
+      dropped = score < BLUR_VARIANCE_MIN;
+    }
+    if (!dropped) outcome = matchFrame(frame);
+  } finally {
+    frame.delete();
+  }
+  if (dropped) {
+    const box = viewfinderBox(view.width, view.height);
+    drawOverlay({ hit: null, box });
+    showBanner(null);
+    resultEl.textContent = `DROPPED blur=${score.toFixed(1)}`;
+    resultEl.dataset.state = "dropped";
+    delete resultEl.dataset.id;
+    setStatus(`Кадр розмитий (${Math.round(score)}). Пропущено.`);
+    return;
+  }
+  if (mode === "crate" && !outcome.hit) considerUnknown(outcome.box);
+  drawOverlay(outcome);
+  present(outcome);
+  if (!outcome.hit && mode !== "crate") {
+    setStatus("Збігу немає. Обкладинка має бути в зеленій рамці.");
+  } else if (!outcome.hit) {
+    setStatus("Збігу немає. Різкий кадр збережено як невідому обкладинку, якщо минуло 5 с.");
+  } else {
+    setStatus(mode === "crate" ? "Збіг додано до сесії, якщо id не був у останні 5 с." : "Збіг знайдено.");
+  }
+}
+
 function tick() {
   if (!cameraOn) return;
   try {
@@ -879,16 +1297,8 @@ function tick() {
       if (view.width !== video.videoWidth) view.width = video.videoWidth;
       if (view.height !== video.videoHeight) view.height = video.videoHeight;
       ctx.drawImage(video, 0, 0, view.width, view.height);
-      const frame = cv.imread(view);
-      let outcome;
-      try {
-        outcome = matchFrame(frame);
-      } finally {
-        frame.delete();
-      }
+      finishCapturedFrame(cv.imread(view));
       if (!cameraOn) return;
-      drawOverlay(outcome);
-      present(outcome);
     }
   } catch (err) {
     stopCamera();
@@ -946,17 +1356,7 @@ function runStill(image) {
   view.width = width;
   view.height = height;
   ctx.drawImage(image, 0, 0, width, height);
-  const frame = cv.imread(view);
-  let outcome;
-  try {
-    outcome = matchFrame(frame);
-  } finally {
-    frame.delete();
-  }
-  drawOverlay(outcome);
-  present(outcome);
-  if (!outcome.hit) setStatus("Збігу немає. Обкладинка має бути в зеленій рамці.");
-  else setStatus(mode === "crate" ? "Збіг додано до сесії, якщо id не був у останні 5 с." : "Збіг знайдено.");
+  finishCapturedFrame(cv.imread(view));
 }
 
 function indexCover(image, meta) {
@@ -1022,6 +1422,7 @@ async function boot() {
       built.push(indexCover(image, meta));
     }
     records = built;
+    await loadBakedWantlist();
     ready = true;
     document.documentElement.dataset.ready = "1";
     enableControls();
@@ -1034,8 +1435,6 @@ async function boot() {
   }
 }
 
-document.getElementById("mode-single").addEventListener("click", () => setMode("single"));
-document.getElementById("mode-crate").addEventListener("click", () => setMode("crate"));
 startBtn.addEventListener("click", () => startCamera());
 stopBtn.addEventListener("click", () => {
   stopCamera();
@@ -1067,9 +1466,16 @@ refreshBtn.addEventListener("click", () => {
   refreshWantlist().catch((err) => setStatus(err && err.message ? err.message : String(err)));
 });
 usernameInput.addEventListener("input", persistDiscogsAccount);
+geminiKeyInput.addEventListener("input", persistGeminiKey);
+crateCreateBtn.addEventListener("click", () => {
+  createCrate(crateNameInput.value);
+  crateNameInput.value = "";
+});
+crateSelect.addEventListener("change", () => activateCrate(crateSelect.value));
 exportAiBtn.addEventListener("click", exportForAi);
 loadDiscogsAccount();
-renderCrate();
+loadGeminiKey();
+createCrate("Ящик 1");
 
 if (typeof cv === "undefined") {
   setStatus("OpenCV.js не завантажився. Потрібна сторінка по http, не file://.");
