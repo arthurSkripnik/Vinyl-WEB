@@ -25,11 +25,20 @@ const startBtn = document.getElementById("start-camera");
 const stopBtn = document.getElementById("stop");
 const ultraBtn = document.getElementById("try-ultra");
 const fileInput = document.getElementById("file-input");
-const exportBtn = document.getElementById("export-session");
 const cratePanel = document.getElementById("crate-panel");
 const crateList = document.getElementById("crate-list");
 const crateEmpty = document.getElementById("crate-empty");
 const crateCount = document.getElementById("crate-count");
+const crateActions = document.getElementById("crate-actions");
+const discogsBtn = document.getElementById("discogs-info");
+const wishlistBtn = document.getElementById("wishlist-check");
+const refreshBtn = document.getElementById("wantlist-refresh");
+const exportAiBtn = document.getElementById("export-ai");
+const usernameInput = document.getElementById("discogs-username");
+const DISCOGS_UA = "VinylCoverScanner/1.0 (local static crate tool; http://127.0.0.1:8000)";
+const DISCOGS_USER_KEY = "vinyl-scanner.discogs.username";
+const DEFAULT_DISCOGS_USER = "Look_at_my_scarface";
+const PRIVATE_WANTLIST = "Список бажань приватний. Потрібен токен Discogs.";
 
 let orb = null;
 let matcher = null;
@@ -40,6 +49,9 @@ let cameraOn = false;
 let raf = 0;
 let liveToken = 0;
 let toastTimer = 0;
+let discogsBusy = false;
+let wishlistBusy = false;
+let sessionCreated = null;
 const session = [];
 const lastAddedAt = new Map();
 
@@ -405,18 +417,72 @@ function drawOverlay(outcome) {
   ctx.restore();
 }
 
+function appendLine(parent, className, text) {
+  const line = document.createElement("p");
+  line.className = className;
+  line.textContent = text;
+  parent.appendChild(line);
+  return line;
+}
+
 function renderCrate() {
   crateList.replaceChildren();
   for (const item of session) {
     const li = document.createElement("li");
     const percent = Math.round(item.confidence * 100);
-    li.textContent = `${item.artist} — ${item.album} (${item.year}) · ${item.genre} · ${percent}%`;
+    appendLine(
+      li,
+      "crate-title",
+      `${item.artist} — ${item.album} (${item.year}) · ${item.genre} · ${percent}%`
+    );
+    appendLine(li, "crate-detail", `Стилі: ${item.styles.join(", ")}`);
+    if (item.discogs) {
+      const info = item.discogs;
+      const bits = [info.title, info.year, info.country, info.label].filter((part) => part != null && part !== "");
+      appendLine(li, "crate-detail", `Discogs: ${bits.join(" · ")}`);
+      if (info.uri) {
+        const linkLine = document.createElement("p");
+        linkLine.className = "crate-detail";
+        if (isDiscogsHttps(info.uri)) {
+          const link = document.createElement("a");
+          link.href = info.uri;
+          link.target = "_blank";
+          link.rel = "noreferrer";
+          link.textContent = info.uri;
+          linkLine.appendChild(link);
+        } else {
+          linkLine.textContent = info.uri;
+        }
+        li.appendChild(linkLine);
+      }
+      const extra = [];
+      if (info.community && typeof info.community === "object") {
+        if (info.community.have != null) extra.push(`мають ${info.community.have}`);
+        if (info.community.want != null) extra.push(`хочуть ${info.community.want}`);
+      }
+      if (info.price != null && info.price !== "") extra.push(`ціна ${info.price}`);
+      if (extra.length) appendLine(li, "crate-detail", extra.join(" · "));
+    } else if (item.discogsError) {
+      appendLine(li, "crate-error", item.discogsError);
+    }
+    const wishClass = item.on_wishlist === true ? "crate-detail crate-wish-yes" : "crate-detail";
+    appendLine(li, wishClass, `Список бажань: ${wishlistLabel(item.on_wishlist)}`);
     crateList.appendChild(li);
   }
-  crateEmpty.hidden = session.length > 0;
+  const hasItems = session.length > 0;
+  crateEmpty.hidden = hasItems;
+  crateActions.hidden = !hasItems;
   crateCount.textContent = String(session.length);
-  exportBtn.disabled = session.length === 0;
-  exportBtn.textContent = session.length ? `Експорт сесії (${session.length})` : "Експорт сесії";
+  discogsBtn.disabled = !hasItems || discogsBusy;
+  wishlistBtn.disabled = !hasItems || wishlistBusy;
+  refreshBtn.disabled = !hasItems || wishlistBusy;
+  exportAiBtn.disabled = !hasItems;
+}
+
+function wishlistLabel(value) {
+  if (value === true) return "так";
+  if (value === false) return "ні";
+  return "не перевірено";
 }
 
 function showToast(text) {
@@ -443,6 +509,7 @@ function considerCrate(hit) {
   const previous = lastAddedAt.get(id);
   if (previous != null && now - previous < CRATE_COOLDOWN_MS) return;
   lastAddedAt.set(id, now);
+  if (!sessionCreated) sessionCreated = new Date().toISOString();
   const styles = Array.isArray(hit.meta.styles) ? hit.meta.styles.slice() : [];
   session.push({
     id,
@@ -451,7 +518,10 @@ function considerCrate(hit) {
     year: hit.meta.year,
     genre: hit.meta.genre,
     styles,
-    confidence: hit.confidence,
+    confidence: Number(hit.confidence.toFixed(4)),
+    discogs: null,
+    on_wishlist: null,
+    discogsError: "",
   });
   renderCrate();
   showToast(`Додано: ${hit.meta.artist} — ${hit.meta.album}`);
@@ -467,36 +537,305 @@ function present(outcome) {
   if (outcome.hit && mode === "crate") considerCrate(outcome.hit);
 }
 
-function sessionPayload() {
-  return session.map((item) => ({
-    artist: item.artist,
-    album: item.album,
-    year: item.year,
-    genre: item.genre,
-    styles: item.styles.slice(),
-    confidence: Number(item.confidence.toFixed(4)),
-  }));
+function sessionDocument() {
+  return {
+    created: sessionCreated,
+    items: session.map((item) => ({
+      id: item.id,
+      artist: item.artist,
+      album: item.album,
+      year: item.year,
+      genre: item.genre,
+      styles: item.styles.slice(),
+      confidence: item.confidence,
+      discogs: item.discogs,
+      on_wishlist: item.on_wishlist,
+    })),
+  };
 }
 
-function exportSession() {
-  if (!session.length) return;
-  const now = new Date();
-  const stamp = [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, "0"),
-    String(now.getDate()).padStart(2, "0"),
-  ].join("-");
-  const blob = new Blob([`${JSON.stringify(sessionPayload(), null, 2)}\n`], {
-    type: "application/json",
+function sessionText() {
+  const blocks = session.map((item) => {
+    const url = item.discogs && item.discogs.uri ? item.discogs.uri : "none";
+    const wish = item.on_wishlist === null ? "null" : String(item.on_wishlist);
+    return [
+      `${item.artist} — ${item.album}`,
+      `year: ${item.year}`,
+      `genre: ${item.genre}`,
+      `styles: ${item.styles.join(", ")}`,
+      `confidence: ${item.confidence}`,
+      `discogs: ${url}`,
+      `on_wishlist: ${wish}`,
+    ].join("\n");
   });
+  return `${blocks.join("\n\n")}\n`;
+}
+
+function localStamp(date = new Date()) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `crate_session_${stamp}.json`;
+  link.download = filename;
   document.body.appendChild(link);
   link.click();
   link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+  window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function exportForAi() {
+  if (!session.length) return;
+  const stamp = localStamp();
+  const json = `${JSON.stringify(sessionDocument(), null, 2)}\n`;
+  downloadBlob(new Blob([json], { type: "application/json" }), `crate_session_${stamp}.json`);
+  window.setTimeout(() => {
+    downloadBlob(new Blob([sessionText()], { type: "text/plain;charset=utf-8" }), `crate_session_${stamp}.txt`);
+  }, 300);
+}
+
+function isDiscogsHttps(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && /(^|\.)discogs\.com$/i.test(url.hostname);
+  } catch (err) {
+    return false;
+  }
+}
+
+function discogsPageUrl(uri) {
+  if (!uri || typeof uri !== "string") return null;
+  if (isDiscogsHttps(uri)) return uri;
+  if (uri.startsWith("/")) return `https://www.discogs.com${uri}`;
+  return null;
+}
+
+function firstLabel(label) {
+  if (Array.isArray(label)) {
+    const found = label.find((part) => typeof part === "string" && part.trim());
+    return found ? found.trim() : null;
+  }
+  if (typeof label === "string" && label.trim()) return label.trim();
+  return null;
+}
+
+function discogsFromResult(result) {
+  const info = {
+    id: result.id,
+    title: result.title ?? null,
+    year: result.year ?? null,
+    label: firstLabel(result.label),
+    country: result.country ?? null,
+    uri: discogsPageUrl(result.uri),
+  };
+  if (result.community && typeof result.community === "object") info.community = result.community;
+  if (result.price != null && result.price !== "") info.price = result.price;
+  else if (result.lowest_price != null && result.lowest_price !== "") info.price = result.lowest_price;
+  return info;
+}
+
+async function lookupDiscogs(item) {
+  const params = new URLSearchParams({
+    q: `${item.artist} ${item.album}`,
+    type: "release",
+  });
+  const response = await fetch(`https://api.discogs.com/database/search?${params}`, {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": DISCOGS_UA,
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`Discogs: помилка HTTP ${response.status}`);
+  }
+  const data = await response.json();
+  const result = Array.isArray(data.results) ? data.results[0] : null;
+  if (!result) throw new Error("Discogs: нічого не знайдено");
+  return discogsFromResult(result);
+}
+
+async function fillDiscogs() {
+  if (!session.length || discogsBusy) return;
+  discogsBusy = true;
+  renderCrate();
+  try {
+    for (const item of session) {
+      item.discogsError = "Запит до Discogs…";
+      renderCrate();
+      try {
+        item.discogs = await lookupDiscogs(item);
+        item.discogsError = "";
+      } catch (err) {
+        item.discogs = null;
+        item.discogsError = err && err.message ? err.message : "Discogs: запит не вдався";
+      }
+      renderCrate();
+    }
+  } finally {
+    discogsBusy = false;
+    renderCrate();
+  }
+}
+
+function sameText(left, right) {
+  return String(left || "").trim().toLowerCase() === String(right || "").trim().toLowerCase();
+}
+
+function cleanArtistName(name) {
+  return String(name || "").replace(/\s+\(\d+\)$/, "").trim();
+}
+
+function compactWant(want) {
+  if (!want || typeof want !== "object") return null;
+  const info = want.basic_information;
+  if (info && typeof info === "object") {
+    const artists = Array.isArray(info.artists) ? info.artists : [];
+    let joined = "";
+    artists.forEach((artist, index) => {
+      const name = cleanArtistName(artist && artist.name);
+      if (!name) return;
+      joined += name;
+      if (index < artists.length - 1) joined += (artist && artist.join) || ", ";
+    });
+    const id = info.id != null ? info.id : want.id;
+    if (id == null) return null;
+    return { id, artist: joined.trim(), title: String(info.title || "") };
+  }
+  if (want.id == null) return null;
+  return { id: want.id, artist: String(want.artist || ""), title: String(want.title || "") };
+}
+
+function wantlistHit(item, wants) {
+  const discogsId = item.discogs && item.discogs.id != null ? String(item.discogs.id) : "";
+  return wants.some((want) => {
+    if (discogsId && String(want.id) === discogsId) return true;
+    if (!sameText(want.title, item.album)) return false;
+    if (sameText(want.artist, item.artist)) return true;
+    const scanned = cleanArtistName(item.artist).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (!scanned) return false;
+    return new RegExp(`(?:^|\\s*(?:,|&)\\s*)${scanned}(?:$|\\s*(?:,|&))`, "i").test(want.artist || "");
+  });
+}
+
+function discogsHeaders() {
+  return {
+    Accept: "application/json",
+    "User-Agent": DISCOGS_UA,
+  };
+}
+
+function nextDiscogsUrl(value) {
+  if (!value || typeof value !== "string") return "";
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:" && url.hostname === "api.discogs.com") return url.toString();
+  } catch (err) {
+    return "";
+  }
+  return "";
+}
+
+async function loadWantlist(username) {
+  const headers = discogsHeaders();
+  const wants = [];
+  const seen = new Set();
+  let url = `https://api.discogs.com/users/${encodeURIComponent(username)}/wants?${new URLSearchParams({
+    page: "1",
+    per_page: "100",
+  })}`;
+  while (url && seen.size < 100) {
+    if (seen.has(url)) break;
+    seen.add(url);
+    let response;
+    try {
+      response = await fetch(url, { headers });
+    } catch (err) {
+      // A private wantlist is HTTP 401, and that response has no CORS header,
+      // so the browser reports a failed fetch instead of the status.
+      throw new Error(PRIVATE_WANTLIST);
+    }
+    if (response.status === 401 || response.status === 403) throw new Error(PRIVATE_WANTLIST);
+    if (!response.ok) throw new Error(`Discogs: помилка HTTP ${response.status}`);
+    const data = await response.json();
+    if (Array.isArray(data.wants)) wants.push(...data.wants);
+    url = nextDiscogsUrl(data.pagination && data.pagination.urls && data.pagination.urls.next);
+  }
+  return wants;
+}
+
+function persistDiscogsAccount() {
+  try {
+    const username = usernameInput.value.trim();
+    if (username) localStorage.setItem(DISCOGS_USER_KEY, username);
+    else localStorage.removeItem(DISCOGS_USER_KEY);
+    localStorage.removeItem("vinyl-scanner.discogs.token");
+  } catch (err) {
+    // Storage can be blocked. The typed username is still used for a refresh.
+  }
+}
+
+function loadDiscogsAccount() {
+  try {
+    const username = localStorage.getItem(DISCOGS_USER_KEY);
+    usernameInput.value = typeof username === "string" && username.trim() ? username : DEFAULT_DISCOGS_USER;
+    localStorage.removeItem("vinyl-scanner.discogs.token");
+  } catch (err) {
+    usernameInput.value = DEFAULT_DISCOGS_USER;
+  }
+}
+
+function applyWantlist(wants, source) {
+  const compact = wants.map(compactWant).filter(Boolean);
+  for (const item of session) item.on_wishlist = wantlistHit(item, compact);
+  const yes = session.filter((item) => item.on_wishlist).length;
+  setStatus(`Список бажань (${source}): ${yes} із ${session.length}.`);
+}
+
+async function checkWishlist() {
+  if (!session.length || wishlistBusy) return;
+  wishlistBusy = true;
+  renderCrate();
+  setStatus("Читаю локальний список бажань…");
+  try {
+    const response = await fetch("wantlist.json");
+    if (!response.ok) throw new Error("wantlist.json не прочитано");
+    const data = await response.json();
+    if (!Array.isArray(data)) throw new Error("wantlist.json має бути масивом");
+    applyWantlist(data, "локальний файл");
+  } catch (err) {
+    setStatus(err && err.message ? err.message : "Список бажань не прочитано.");
+  } finally {
+    wishlistBusy = false;
+    renderCrate();
+  }
+}
+
+async function refreshWantlist() {
+  if (!session.length || wishlistBusy) return;
+  const username = usernameInput.value.trim() || DEFAULT_DISCOGS_USER;
+  if (/[\s/?#]/.test(username)) {
+    setStatus("Ім’я Discogs містить недопустимі символи.");
+    return;
+  }
+  persistDiscogsAccount();
+  wishlistBusy = true;
+  renderCrate();
+  setStatus("Оновлюю список бажань з Discogs…");
+  try {
+    const wants = await loadWantlist(username);
+    applyWantlist(wants, "Discogs");
+  } catch (err) {
+    setStatus(err && err.message ? err.message : "Список бажань не прочитано.");
+  } finally {
+    wishlistBusy = false;
+    renderCrate();
+  }
 }
 
 function setMode(next) {
@@ -718,7 +1057,18 @@ fileInput.addEventListener("change", () => {
   };
   image.src = url;
 });
-exportBtn.addEventListener("click", exportSession);
+discogsBtn.addEventListener("click", () => {
+  fillDiscogs().catch((err) => setStatus(err && err.message ? err.message : String(err)));
+});
+wishlistBtn.addEventListener("click", () => {
+  checkWishlist().catch((err) => setStatus(err && err.message ? err.message : String(err)));
+});
+refreshBtn.addEventListener("click", () => {
+  refreshWantlist().catch((err) => setStatus(err && err.message ? err.message : String(err)));
+});
+usernameInput.addEventListener("input", persistDiscogsAccount);
+exportAiBtn.addEventListener("click", exportForAi);
+loadDiscogsAccount();
 renderCrate();
 
 if (typeof cv === "undefined") {

@@ -149,8 +149,45 @@ button:disabled, .file-btn:has(input:disabled) {
   border-radius: 12px;
 }
 
-#crate-list { margin: 10px 0 0; padding-left: 1.2rem; }
-#crate-list li { margin: 4px 0; }
+.discogs-account {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-top: 12px;
+  max-width: 28rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.field input {
+  background: #101114;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+#crate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+#crate-list { margin: 12px 0 0; padding-left: 1.2rem; }
+#crate-list li { margin: 0 0 12px; }
+.crate-title { margin: 0; }
+.crate-detail { margin: 2px 0 0; color: var(--muted); font-size: 0.92rem; }
+.crate-detail a { color: var(--mint); }
+.crate-error { margin: 2px 0 0; color: #ffb4b4; font-size: 0.92rem; }
+.crate-wish-yes { color: var(--mint); }
 #crate-empty { color: var(--muted); margin: 8px 0 0; }
 
 :focus-visible {
@@ -159,5 +196,5 @@ button:disabled, .file-btn:has(input:disabled) {
 }
 
 @media (max-width: 640px) {
-  .modes { grid-template-columns: 1fr; }
+  .modes, .discogs-account { grid-template-columns: 1fr; }
 }

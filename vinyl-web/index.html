@@ -38,14 +38,25 @@
       <label class="file-btn" for="file-input">Зображення
         <input id="file-input" type="file" accept="image/*" disabled>
       </label>
-      <button type="button" id="export-session" disabled>Експорт сесії</button>
     </div>
 
     <p id="result" data-state="idle" aria-live="polite"></p>
 
     <section id="crate-panel" hidden>
       <h2>Сесія ящика <span id="crate-count">0</span></h2>
-      <p class="hint">Новий рядок з’являється, якщо цей id ще не додавали протягом останніх 5 секунд.</p>
+      <p class="hint">Новий рядок з’являється, якщо цей id ще не додавали протягом останніх 5 секунд. Файл сесії лишається в пам’яті, доки не оновити сторінку.</p>
+      <div class="discogs-account">
+        <label class="field" for="discogs-username">Ім’я Discogs
+          <input id="discogs-username" type="text" value="Look_at_my_scarface" autocomplete="username" autocapitalize="off" spellcheck="false">
+        </label>
+      </div>
+      <p class="hint">Список бажань читає локальний wantlist.json і працює без мережі. Оновити з Discogs перечитує відкритий список, коли є інтернет.</p>
+      <div id="crate-actions" hidden>
+        <button type="button" id="discogs-info">Дані Discogs</button>
+        <button type="button" id="wishlist-check">Список бажань</button>
+        <button type="button" id="wantlist-refresh">Оновити з Discogs</button>
+        <button type="button" id="export-ai">Експорт для ШІ</button>
+      </div>
       <ol id="crate-list"></ol>
       <p id="crate-empty">Поки порожньо.</p>
     </section>
