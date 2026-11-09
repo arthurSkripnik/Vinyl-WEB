@@ -46,7 +46,8 @@ const DISCOGS_USER_KEY = "vinyl-scanner.discogs.username";
 const DEFAULT_DISCOGS_USER = "Look_at_my_scarface";
 const PRIVATE_WANTLIST = "Список бажань приватний. Потрібен токен Discogs.";
 const GEMINI_KEY_STORAGE = "vinyl-scanner.gemini.apiKey";
-const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-3.8-flash"];
+const GEMINI_MODEL = "gemini-3.8-flash";
+const GEMINI_RETRY_MS = [2000, 4000, 8000];
 
 let orb = null;
 let matcher = null;
@@ -1144,37 +1145,30 @@ function parseGeminiPayload(data) {
   return { artist, album, year };
 }
 
-async function modelIsMissing(response) {
-  if (response.status === 404) return true;
-  if (response.status !== 400) return false;
-  try {
-    const data = await response.json();
-    return Boolean(data && data.error && data.error.status === "NOT_FOUND");
-  } catch (err) {
-    return false;
-  }
-}
-
 async function askGemini(jpeg, apiKey) {
-  for (const model of GEMINI_MODELS) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+  const body = JSON.stringify(geminiRequestBody(jpeg));
+  let attempt = 0;
+  for (;;) {
     let response;
     try {
-      response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      response = await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "x-goog-api-key": apiKey,
         },
-        body: JSON.stringify(geminiRequestBody(jpeg)),
+        body,
       });
     } catch (err) {
       throw new Error("Gemini недоступний.");
     }
     if (response.ok) return parseGeminiPayload(await response.json());
-    if (await modelIsMissing(response)) continue;
-    throw new Error("Gemini не відповів.");
+    const retryable = response.status === 503 || response.status === 429;
+    if (!retryable || attempt >= GEMINI_RETRY_MS.length) throw new Error("Gemini не відповів.");
+    await new Promise((resolve) => window.setTimeout(resolve, GEMINI_RETRY_MS[attempt]));
+    attempt += 1;
   }
-  throw new Error("Gemini не відповів.");
 }
 
 function enqueueGemini(entry) {
