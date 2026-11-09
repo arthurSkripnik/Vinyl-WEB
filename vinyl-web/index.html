@@ -28,7 +28,7 @@
 
     <section class="stage" aria-label="Видошукач">
       <canvas id="view" width="720" height="960"></canvas>
-      <p class="capture-note">Автозахоплення</p>
+      <p class="capture-note" id="capture-note">Камера вимкнена</p>
       <div id="banner" class="banner" hidden></div>
       <div id="toast" class="toast" role="status" hidden></div>
     </section>
@@ -41,6 +41,7 @@
 
     <div class="controls">
       <button type="button" id="start-camera" disabled>Камера</button>
+      <button type="button" id="capture" disabled>Зняти</button>
       <button type="button" id="stop" disabled>Стоп</button>
       <button type="button" id="try-ultra" disabled>Обкладинка Ultra</button>
       <label class="file-btn" for="file-input">Зображення

@@ -23,6 +23,8 @@ const view = document.getElementById("view");
 const ctx = view.getContext("2d", { willReadFrequently: true });
 const video = document.getElementById("camera");
 const startBtn = document.getElementById("start-camera");
+const captureBtn = document.getElementById("capture");
+const captureNote = document.getElementById("capture-note");
 const stopBtn = document.getElementById("stop");
 const ultraBtn = document.getElementById("try-ultra");
 const fileInput = document.getElementById("file-input");
@@ -47,7 +49,9 @@ const DEFAULT_DISCOGS_USER = "Look_at_my_scarface";
 const PRIVATE_WANTLIST = "Список бажань приватний. Потрібен токен Discogs.";
 const GEMINI_KEY_STORAGE = "vinyl-scanner.gemini.apiKey";
 const GEMINI_MODEL = "gemini-3.8-flash";
-const GEMINI_RETRY_MS = [2000, 4000, 8000];
+const GEMINI_MAX_EDGE = 768;
+const GEMINI_PAUSE_MS = 30000;
+const GEMINI_PAUSE_MAX_MS = 120000;
 
 let orb = null;
 let matcher = null;
@@ -65,6 +69,7 @@ const crates = [];
 let activeCrate = null;
 const geminiQueue = [];
 let geminiDrainTimer = 0;
+let geminiBusy = false;
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -470,7 +475,6 @@ function createCrate(name) {
     items: [],
     unknowns: [],
     lastAddedAt: new Map(),
-    lastUnknownAt: Number.NEGATIVE_INFINITY,
   };
   crates.push(crate);
   activateCrate(crate.id);
@@ -1007,6 +1011,8 @@ function stopCamera() {
     video.srcObject = null;
   }
   stopBtn.disabled = true;
+  captureBtn.disabled = true;
+  captureNote.textContent = "Камера вимкнена";
 }
 
 function roiLaplacianVariance(frame) {
@@ -1145,74 +1151,137 @@ function parseGeminiPayload(data) {
   return { artist, album, year };
 }
 
+function geminiPauseMs(response) {
+  const header = response.headers.get("Retry-After");
+  if (header) {
+    const trimmed = header.trim();
+    if (/^\d+(\.\d+)?$/.test(trimmed)) {
+      const ms = Number(trimmed) * 1000;
+      if (ms > 0 && ms <= GEMINI_PAUSE_MAX_MS) return Math.round(ms);
+    } else {
+      const when = Date.parse(trimmed);
+      if (!Number.isNaN(when)) {
+        const delta = when - Date.now();
+        if (delta > 0 && delta <= GEMINI_PAUSE_MAX_MS) return delta;
+      }
+    }
+  }
+  return GEMINI_PAUSE_MS;
+}
+
+function shrinkJpegForGemini(base64) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const width = image.naturalWidth || image.width;
+      const height = image.naturalHeight || image.height;
+      const longest = Math.max(width, height);
+      if (!width || !height || longest <= GEMINI_MAX_EDGE) {
+        resolve(base64);
+        return;
+      }
+      const scale = GEMINI_MAX_EDGE / longest;
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+      canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          resolve(base64);
+          return;
+        }
+        blobBase64(blob).then(resolve, reject);
+      }, "image/jpeg", 0.7);
+    };
+    image.onerror = () => reject(new Error("Немає кадру для Gemini."));
+    image.src = `data:image/jpeg;base64,${base64}`;
+  });
+}
+
 async function askGemini(jpeg, apiKey) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-  const body = JSON.stringify(geminiRequestBody(jpeg));
-  let attempt = 0;
-  for (;;) {
-    let response;
-    try {
-      response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": apiKey,
-        },
-        body,
-      });
-    } catch (err) {
-      throw new Error("Gemini недоступний.");
-    }
-    if (response.ok) return parseGeminiPayload(await response.json());
-    const retryable = response.status === 503 || response.status === 429;
-    if (!retryable || attempt >= GEMINI_RETRY_MS.length) throw new Error("Gemini не відповів.");
-    await new Promise((resolve) => window.setTimeout(resolve, GEMINI_RETRY_MS[attempt]));
-    attempt += 1;
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify(geminiRequestBody(jpeg)),
+    });
+  } catch (err) {
+    throw new Error("Gemini недоступний.");
   }
+  if (response.ok) return parseGeminiPayload(await response.json());
+  if (response.status === 503 || response.status === 429) {
+    const paused = new Error("Gemini зайнятий.");
+    paused.pauseMs = geminiPauseMs(response);
+    throw paused;
+  }
+  throw new Error("Gemini не відповів.");
 }
 
 function enqueueGemini(entry) {
   if (!readGeminiKey() || !entry.jpeg) return;
+  if (geminiQueue.includes(entry)) return;
   entry.state = "processing";
   entry.geminiError = "";
   geminiQueue.push(entry);
   renderCrate();
-  if (!geminiDrainTimer) geminiDrainTimer = window.setTimeout(drainGemini, 0);
+  if (!geminiBusy && !geminiDrainTimer) geminiDrainTimer = window.setTimeout(drainGemini, 0);
 }
 
 async function drainGemini() {
   geminiDrainTimer = 0;
-  const entry = geminiQueue.shift();
-  if (!entry) return;
-  const apiKey = readGeminiKey();
-  if (!apiKey || !entry.jpeg) {
-    entry.state = "unknown";
-    if (!entry.jpeg) entry.geminiError = "Немає кадру для Gemini.";
-    renderCrate();
-  } else {
-    try {
-      const found = await askGemini(entry.jpeg, apiKey);
-      entry.artist = found.artist;
-      entry.album = found.album;
-      entry.year = found.year;
-      entry.state = "enriched";
-      entry.geminiError = "";
-    } catch (err) {
-      entry.state = "unknown";
-      entry.artist = "";
-      entry.album = "";
-      entry.year = "";
-      entry.geminiError = err && err.message ? err.message : "Gemini не відповів.";
+  if (geminiBusy) return;
+  geminiBusy = true;
+  try {
+    while (geminiQueue.length) {
+      const entry = geminiQueue[0];
+      const apiKey = readGeminiKey();
+      if (!apiKey || !entry.jpeg) {
+        geminiQueue.shift();
+        entry.state = "unknown";
+        if (!entry.jpeg) entry.geminiError = "Немає кадру для Gemini.";
+        renderCrate();
+        continue;
+      }
+      try {
+        if (!entry.geminiJpeg) entry.geminiJpeg = await shrinkJpegForGemini(entry.jpeg);
+        const found = await askGemini(entry.geminiJpeg, apiKey);
+        geminiQueue.shift();
+        entry.artist = found.artist;
+        entry.album = found.album;
+        entry.year = found.year;
+        entry.state = "enriched";
+        entry.geminiError = "";
+        renderCrate();
+      } catch (err) {
+        if (err && typeof err.pauseMs === "number") {
+          entry.state = "processing";
+          entry.geminiError = "";
+          renderCrate();
+          const seconds = Math.max(1, Math.round(err.pauseMs / 1000));
+          setStatus(`Gemini зайнятий. Той самий кадр піде через ${seconds} с.`);
+          await new Promise((resolve) => window.setTimeout(resolve, err.pauseMs));
+          continue;
+        }
+        geminiQueue.shift();
+        entry.state = "unknown";
+        entry.artist = "";
+        entry.album = "";
+        entry.year = "";
+        entry.geminiError = err && err.message ? err.message : "Gemini не відповів.";
+        renderCrate();
+      }
     }
-    renderCrate();
+  } finally {
+    geminiBusy = false;
   }
-  if (geminiQueue.length) geminiDrainTimer = window.setTimeout(drainGemini, 0);
 }
 
 function considerUnknown(box) {
-  const now = performance.now();
-  if (now - activeCrate.lastUnknownAt < CRATE_COOLDOWN_MS) return;
-  activeCrate.lastUnknownAt = now;
   const nn = String(activeCrate.unknowns.length + 1).padStart(2, "0");
   const entry = {
     file: `unknown_${nn}.jpg`,
@@ -1278,28 +1347,49 @@ function finishCapturedFrame(frame) {
   if (!outcome.hit && mode !== "crate") {
     setStatus("Збігу немає. Обкладинка має бути в зеленій рамці.");
   } else if (!outcome.hit) {
-    setStatus("Збігу немає. Різкий кадр збережено як невідому обкладинку, якщо минуло 5 с.");
+    setStatus("Збігу немає. Різкий кадр збережено як невідому обкладинку.");
   } else {
     setStatus(mode === "crate" ? "Збіг додано до сесії, якщо id не був у останні 5 с." : "Збіг знайдено.");
   }
 }
 
+function drawLiveFrame() {
+  if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) return;
+  if (view.width !== video.videoWidth) view.width = video.videoWidth;
+  if (view.height !== video.videoHeight) view.height = video.videoHeight;
+  ctx.drawImage(video, 0, 0, view.width, view.height);
+  const box = viewfinderBox(view.width, view.height);
+  ctx.strokeStyle = "#00ff00";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(box[0], box[1], box[2] - box[0], box[3] - box[1]);
+}
+
 function tick() {
   if (!cameraOn) return;
   try {
-    if (video.readyState >= 2 && video.videoWidth && video.videoHeight) {
-      if (view.width !== video.videoWidth) view.width = video.videoWidth;
-      if (view.height !== video.videoHeight) view.height = video.videoHeight;
-      ctx.drawImage(video, 0, 0, view.width, view.height);
-      finishCapturedFrame(cv.imread(view));
-      if (!cameraOn) return;
-    }
+    drawLiveFrame();
   } catch (err) {
     stopCamera();
     setStatus(err && err.message ? err.message : String(err));
     return;
   }
   if (cameraOn) raf = requestAnimationFrame(tick);
+}
+
+function captureFromCamera() {
+  if (!ready || !cameraOn) return;
+  if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+    setStatus("Кадр ще не готовий. Зачекайте на зображення з камери.");
+    return;
+  }
+  try {
+    if (view.width !== video.videoWidth) view.width = video.videoWidth;
+    if (view.height !== video.videoHeight) view.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, view.width, view.height);
+    finishCapturedFrame(cv.imread(view));
+  } catch (err) {
+    setStatus(err && err.message ? err.message : String(err));
+  }
 }
 
 async function startCamera() {
@@ -1330,7 +1420,9 @@ async function startCamera() {
     }
     cameraOn = true;
     stopBtn.disabled = false;
-    setStatus("Камера увімкнена. Тримайте обкладинку в зеленій рамці.");
+    captureBtn.disabled = false;
+    captureNote.textContent = "Натисніть Зняти";
+    setStatus("Камера увімкнена. Натисніть Зняти, коли обкладинка в зеленій рамці.");
     raf = requestAnimationFrame(tick);
   } catch (err) {
     if (token !== liveToken) return;
@@ -1422,14 +1514,14 @@ async function boot() {
     enableControls();
     drawPlaceholder();
     const counts = built.map((record) => `${record.meta.album} ${record.count}`).join(", ");
-    setStatus(`Готово. Індекс: ${counts}.`);
-    startCamera();
+    setStatus(`Готово. Індекс: ${counts}. Натисніть Камера.`);
   } catch (err) {
     setStatus(err && err.message ? err.message : String(err));
   }
 }
 
 startBtn.addEventListener("click", () => startCamera());
+captureBtn.addEventListener("click", () => captureFromCamera());
 stopBtn.addEventListener("click", () => {
   stopCamera();
   setStatus("Камеру зупинено.");

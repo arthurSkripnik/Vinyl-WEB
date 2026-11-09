@@ -181,6 +181,13 @@ button:disabled, .file-btn:has(input:disabled) {
   cursor: not-allowed;
 }
 
+#capture:not(:disabled) {
+  background: var(--mint);
+  color: #101114;
+  border-color: var(--mint);
+  font-weight: 650;
+}
+
 .file-btn { position: relative; display: inline-flex; align-items: center; }
 
 .file-btn input {

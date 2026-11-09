@@ -16,7 +16,7 @@ python3 -m http.server
 
 Then open http://127.0.0.1:8000/
 
-Allow the camera if the browser asks. A green viewfinder marks the region that is matched. **Стоп** stops the camera.
+The camera stays off until **Камера**. **Зняти** captures one frame through the blur gate and the local match. **Стоп** stops the camera. A green viewfinder marks the region that is matched.
 
 If the camera is denied, use **Зображення** to pick a still, or **Обкладинка Ultra** to run the bundled Depeche Mode cover. That button is enough to prove a match without a webcam.
 
@@ -25,11 +25,11 @@ If the camera is denied, use **Зображення** to pick a still, or **Об
 The page is one phone column, top to bottom:
 
 1. **Ящик** — a selector to switch crates, plus a name field and **Створити** to add one. Crates stay in memory until reload.
-2. A large viewfinder marked **Автозахоплення**. The camera starts on its own. A frame is kept only when the viewfinder Laplacian variance is at least 100.
+2. A large viewfinder. The camera stays off until **Камера**. **Зняти** captures one frame. A frame is kept only when the viewfinder Laplacian variance is at least 100.
 3. Live counts: **Скановано**, **Обробка**, **Збіги**.
 4. **Вміст ящика**. Each row has a status: у локальній базі, у списку бажань when the baked wantlist matches, розпізнано Gemini, обробка, or невідомо.
 
-A sharp local hit is ignored for 5 seconds if that album id was just added to the current crate. A sharp miss is stored as `unknown_NN.jpg` at most once every 5 seconds. If the Gemini key field is empty, that row stays невідомо and no request is made. If a key is present, the JPEG is sent after the frame has been queued, not from inside the camera loop. The field is `gemini-api-key`. Its value is kept only in the browser's localStorage and is never written into this project, the page file, or the export. Refreshing the page clears the crates.
+A sharp local hit is ignored for 5 seconds if that album id was just added to the current crate. Each sharp miss from **Зняти** (or from a still) is stored once as `unknown_NN.jpg`. The camera loop does not queue misses. If the Gemini key field is empty, that row stays невідомо and no request is made. If a key is present, one cover is sent at a time, after the frame has been queued, not from inside the camera loop. The JPEG is scaled so its longest side is about 768px before that request. On 429 or 503 the queue pauses (30 seconds, or a small `Retry-After`) and then sends the same cover. The field is `gemini-api-key`. Its value is kept only in the browser's localStorage under `vinyl-scanner.gemini.apiKey` and is never written into this project, the page file, or the export. Refreshing the page clears the crates.
 
 The overlay shows artist, album, year, primary style, a related hint (`Related: …`), and ownership. This database has no ownership fields, so the line is `ownership unknown`. A Discogs price line is drawn only when the record has a numeric or text `discogs_price` or `price`. No price is invented, and this database has neither field.
 
