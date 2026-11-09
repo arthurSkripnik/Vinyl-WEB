@@ -1,0 +1,32 @@
+[
+  {
+    "id": "1",
+    "artist": "Depeche Mode",
+    "album": "Ultra",
+    "year": 1997,
+    "genre": "Electronic",
+    "styles": ["Synth-pop", "Alternative Rock", "Dark Wave"],
+    "spotify_source": "Collection & Playlist: 90s Dark Wave",
+    "cover_filename": "depeche_mode_ultra.jpg"
+  },
+  {
+    "id": "2",
+    "artist": "Massive Attack",
+    "album": "Mezzanine",
+    "year": 1998,
+    "genre": "Electronic",
+    "styles": ["Trip Hop", "Ambient"],
+    "spotify_source": "Playlist: Dark Night Vibes",
+    "cover_filename": "massive_attack_mezzanine.jpg"
+  },
+  {
+    "id": "3",
+    "artist": "Portishead",
+    "album": "Dummy",
+    "year": 1994,
+    "genre": "Electronic",
+    "styles": ["Trip Hop", "Downtempo"],
+    "spotify_source": "Collection",
+    "cover_filename": "portishead_dummy.jpg"
+  }
+]

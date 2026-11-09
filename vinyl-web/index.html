@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Сканер платівок</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="prefetch" href="database.json">
+</head>
+<body data-mode="single">
+  <main>
+    <header>
+      <h1>Сканер платівок</h1>
+      <p id="status" aria-live="polite">Завантаження OpenCV…</p>
+    </header>
+
+    <div class="modes" role="group" aria-label="Режим">
+      <button type="button" id="mode-single" aria-pressed="true">
+        Разова перевірка
+        <small>Один диск. Повний збіг із локальною базою.</small>
+      </button>
+      <button type="button" id="mode-crate" aria-pressed="false">
+        Копання ящиків
+        <small>Безперервний скан. Той самий id ігнорується 5 секунд.</small>
+      </button>
+    </div>
+
+    <div class="stage">
+      <canvas id="view" width="960" height="720"></canvas>
+      <div id="banner" class="banner" hidden></div>
+      <div id="toast" class="toast" role="status" hidden></div>
+    </div>
+
+    <div class="controls">
+      <button type="button" id="start-camera" disabled>Камера</button>
+      <button type="button" id="stop" disabled>Стоп</button>
+      <button type="button" id="try-ultra" disabled>Обкладинка Ultra</button>
+      <label class="file-btn" for="file-input">Зображення
+        <input id="file-input" type="file" accept="image/*" disabled>
+      </label>
+      <button type="button" id="export-session" disabled>Експорт сесії</button>
+    </div>
+
+    <p id="result" data-state="idle" aria-live="polite"></p>
+
+    <section id="crate-panel" hidden>
+      <h2>Сесія ящика <span id="crate-count">0</span></h2>
+      <p class="hint">Новий рядок з’являється, якщо цей id ще не додавали протягом останніх 5 секунд.</p>
+      <ol id="crate-list"></ol>
+      <p id="crate-empty">Поки порожньо.</p>
+    </section>
+  </main>
+
+  <video id="camera" playsinline autoplay muted hidden></video>
+  <img id="img-ultra" data-cover="depeche_mode_ultra.jpg" src="covers/depeche_mode_ultra.jpg" alt="Depeche Mode — Ultra" hidden>
+  <img id="img-mezzanine" data-cover="massive_attack_mezzanine.jpg" src="covers/massive_attack_mezzanine.jpg" alt="" hidden>
+  <img id="img-dummy" data-cover="portishead_dummy.jpg" src="covers/portishead_dummy.jpg" alt="" hidden>
+
+  <script src="https://docs.opencv.org/4.13.0/opencv.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
